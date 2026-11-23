@@ -54,9 +54,22 @@ android {
         }
     }
 
+    // A fixed, public debug key checked into the repo, so an APK built on any
+    // machine can replace one built on another without an uninstall.  Not a
+    // secret: it only signs debug builds of this teleop app.
+    signingConfigs {
+        teleopDebug {
+            storeFile file('teleop-debug.keystore')
+            storePassword 'android'
+            keyAlias 'teleopdebug'
+            keyPassword 'android'
+        }
+    }
+
     buildTypes {
         debug {
             debuggable true
+            signingConfig signingConfigs.teleopDebug
         }
         release {
             debuggable false

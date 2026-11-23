@@ -1,3 +1,41 @@
+# oculus_reader (Hello Robot passthrough fork)
+
+Fork of [jborbik/oculus_reader](https://github.com/jborbik/oculus_reader) used by
+Stretch 4 Quest teleop. The Python library is unchanged. The headset app differs:
+
+- **Passthrough.** The headset shows the room through its cameras instead of the
+  sample's green background and blue debug panel, so you can wear it normally and
+  watch the robot.
+- **No hidden buttons.** The debug panel is gone and the controller ray can't click
+  it (one of its buttons added 150 ms of lag to every frame).
+- **Fixed debug signing key** (`app/teleop-debug.keystore`), so an APK built on any
+  machine replaces one built on another.
+
+### Switching a headset from the upstream app
+
+The upstream APK is signed with a different key, so it has to be uninstalled once:
+
+```bash
+adb uninstall com.rail.oculus.teleop
+python3 oculus_reader/install.py
+```
+
+### Rebuilding the APK without Android Studio
+
+```bash
+# one-time: Android command-line tools into ~/Android/Sdk, then
+~/Android/Sdk/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-32" \
+    "build-tools;34.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+
+cd app
+echo "sdk.dir=$HOME/Android/Sdk" > local.properties
+./gradlew assembleDebug
+cp build/outputs/apk/debug/OculusTeleop-debug.apk ../oculus_reader/APK/teleop-debug.apk
+python3 ../oculus_reader/install.py --reinstall
+```
+
+-------------------
+
 # oculus_reader
 
 This is the active maintenance fork of the RAIL lab's oculus_reader. This version adds support for Quest 3 and updated OpenXR SDKs.
