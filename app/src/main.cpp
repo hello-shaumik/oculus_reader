@@ -58,7 +58,8 @@ PFN_xrGetDeviceSampleRateFB xrGetDeviceSampleRateFB = nullptr;
 class OculusTeleopApp : public OVRFW::XrApp {
    public:
     OculusTeleopApp() : OVRFW::XrApp() {
-        BackgroundColor = OVR::Vector4f(0.60f, 0.95f, 0.4f, 1.0f);
+        // Fully transparent, so the passthrough layer behind shows through.
+        BackgroundColor = OVR::Vector4f(0.0f, 0.0f, 0.0f, 0.0f);
         OpenXRVersion = XR_API_VERSION_1_1;
     }
 
@@ -103,7 +104,8 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
         std::vector<const char*> extensions = XrApp::GetExtensions();
         extensions.push_back(XR_FB_HAPTIC_AMPLITUDE_ENVELOPE_EXTENSION_NAME);
         extensions.push_back(XR_FB_HAPTIC_PCM_EXTENSION_NAME);
-                return extensions;
+        extensions.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
+        return extensions;
     }
 
     // Returns a map from interaction profile paths to vectors of suggested bindings.
@@ -798,10 +800,81 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
         /// enumerate all actions
         EnumerateActions();
 
+        StartPassthrough();
+
         return true;
     }
 
+    // Show the headset cameras' view of the room behind everything we render.
+    // On failure we log and carry on: the app still streams controller poses,
+    // the view is just black.
+    void StartPassthrough() {
+        XrInstance instance = GetInstance();
+        OXR(xrGetInstanceProcAddr(instance, "xrCreatePassthroughFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&xrCreatePassthroughFB_)));
+        OXR(xrGetInstanceProcAddr(instance, "xrDestroyPassthroughFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&xrDestroyPassthroughFB_)));
+        OXR(xrGetInstanceProcAddr(instance, "xrCreatePassthroughLayerFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&xrCreatePassthroughLayerFB_)));
+        OXR(xrGetInstanceProcAddr(instance, "xrDestroyPassthroughLayerFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&xrDestroyPassthroughLayerFB_)));
+        OXR(xrGetInstanceProcAddr(instance, "xrPassthroughLayerSetStyleFB",
+            reinterpret_cast<PFN_xrVoidFunction*>(&xrPassthroughLayerSetStyleFB_)));
+        if (!xrCreatePassthroughFB_ || !xrCreatePassthroughLayerFB_) {
+            ALOGE("Passthrough: XR_FB_passthrough functions unavailable");
+            return;
+        }
+
+        XrPassthroughCreateInfoFB ptInfo{XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
+        ptInfo.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
+        XrResult r = xrCreatePassthroughFB_(GetSession(), &ptInfo, &passthrough_);
+        if (r != XR_SUCCESS) {
+            ALOGE("Passthrough: xrCreatePassthroughFB failed, error %d", r);
+            passthrough_ = XR_NULL_HANDLE;
+            return;
+        }
+
+        XrPassthroughLayerCreateInfoFB layerInfo{XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
+        layerInfo.passthrough = passthrough_;
+        layerInfo.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
+        layerInfo.flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB;
+        r = xrCreatePassthroughLayerFB_(GetSession(), &layerInfo, &passthroughLayer_);
+        if (r != XR_SUCCESS) {
+            ALOGE("Passthrough: xrCreatePassthroughLayerFB failed, error %d", r);
+            passthroughLayer_ = XR_NULL_HANDLE;
+            return;
+        }
+
+        XrPassthroughStyleFB style{XR_TYPE_PASSTHROUGH_STYLE_FB};
+        style.textureOpacityFactor = 1.0f;
+        style.edgeColor = {0.0f, 0.0f, 0.0f, 0.0f};
+        OXR(xrPassthroughLayerSetStyleFB_(passthroughLayer_, &style));
+        ALOG("Passthrough: started");
+    }
+
+    void StopPassthrough() {
+        if (passthroughLayer_ != XR_NULL_HANDLE) {
+            OXR(xrDestroyPassthroughLayerFB_(passthroughLayer_));
+            passthroughLayer_ = XR_NULL_HANDLE;
+        }
+        if (passthrough_ != XR_NULL_HANDLE) {
+            OXR(xrDestroyPassthroughFB_(passthrough_));
+            passthrough_ = XR_NULL_HANDLE;
+        }
+    }
+
+    // Passthrough goes underneath the app's own (now transparent) projection layer.
+    virtual void PreProjectionAddLayer(xrCompositorLayerUnion* layers, int& layerCount) override {
+        if (passthroughLayer_ == XR_NULL_HANDLE) {
+            return;
+        }
+        XrCompositionLayerPassthroughFB layer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
+        layer.layerHandle = passthroughLayer_;
+        layers[layerCount++].Passthrough = layer;
+    }
+
     virtual void SessionEnd() override {
+        StopPassthrough();
         controllerRenderL_.Shutdown();
         controllerRenderR_.Shutdown();
         beamRenderer_.Shutdown();
@@ -1106,8 +1179,9 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
         /*
          */
 
-        ui_.Update(in);
-        beamRenderer_.Update(in, ui_.HitTestDevices());
+        // The sample's debug panel is hidden (see Render), so don't let the
+        // controller ray click its invisible buttons either.  One of them
+        // ("Lag On") would add 150 ms to every frame.
 
         /// Add some deliberate lag to the app
         if (delayUI_) {
@@ -1117,18 +1191,10 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
 
     // Render eye buffers while running
     virtual void Render(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out) override {
-        /// Render UI
-        ui_.Render(in, out);
-        /// Render controllers
-        if (in.LeftRemoteTracked) {
-            controllerRenderL_.Render(out.Surfaces);
-        }
-        if (in.RightRemoteTracked) {
-            controllerRenderR_.Render(out.Surfaces);
-        }
-
-        /// Render beams
-        beamRenderer_.Render(in, out);
+        // Draw nothing: the view is pure passthrough, so the operator sees the
+        // room (and the real controllers) instead of the sample's debug panel.
+        (void)in;
+        (void)out;
     }
 
     void EnumerateActions() {
@@ -1301,6 +1367,15 @@ Function to create PCM samples from an array of amplitudes, frequency and durati
 
    public:
    private:
+    // XR_FB_passthrough
+    PFN_xrCreatePassthroughFB xrCreatePassthroughFB_ = nullptr;
+    PFN_xrDestroyPassthroughFB xrDestroyPassthroughFB_ = nullptr;
+    PFN_xrCreatePassthroughLayerFB xrCreatePassthroughLayerFB_ = nullptr;
+    PFN_xrDestroyPassthroughLayerFB xrDestroyPassthroughLayerFB_ = nullptr;
+    PFN_xrPassthroughLayerSetStyleFB xrPassthroughLayerSetStyleFB_ = nullptr;
+    XrPassthroughFB passthrough_ = XR_NULL_HANDLE;
+    XrPassthroughLayerFB passthroughLayer_ = XR_NULL_HANDLE;
+
     OVRFW::ControllerRenderer controllerRenderL_;
     OVRFW::ControllerRenderer controllerRenderR_;
     OVRFW::TinyUI ui_;
